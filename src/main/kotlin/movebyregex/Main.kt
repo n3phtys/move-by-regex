@@ -1,11 +1,13 @@
 package movebyregex
 
+import com.beust.klaxon.Klaxon
 import com.github.ajalt.clikt.core.*
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.arguments.multiple
 import com.github.ajalt.clikt.parameters.options.*
 import com.github.ajalt.clikt.parameters.types.*
 import java.io.File
+import java.lang.IllegalStateException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.function.BiPredicate
@@ -14,7 +16,7 @@ import java.util.stream.Collectors
 
 //default command just takes a list of files as argument, ready for usage
 fun main(args: Array<String>) {
-    val data = DataHolder()
+    val data = UserConfFileDataHolder()
     Welcome().subcommands(
         Dashboard(data),
         Delete(data),
@@ -32,15 +34,80 @@ class Welcome : CliktCommand() {
     }
 }
 
-class DataHolder {
-    //mocks for now, will be written to user profile file in the future
-    var regexesFiles = listOf(Pair("\\[MyTag]thefile.mkv".toRegex(), File("tmp")))
-    var fileExtensionRegex = "mkv".toRegex()
-    var exclusionRegex = "fileIDoNotWant".toRegex()
+abstract class DataHolder {
+    abstract var regexesFiles: List<Pair<Regex, File>>
+    abstract var fileExtensionRegex: Regex
+    abstract var exclusionRegex: Regex
 }
 
-class Delete(val dataholder: DataHolder) : CliktCommand() {
-    val index: Int by option(help = "index to replace, null if just add new one").int().required()
+data class RegexFilePair(
+    val regex: String,
+    val filepath: String
+)
+
+data class UserConfFile(
+    val regexMatches: List<RegexFilePair> = listOf(RegexFilePair("myfile[0-9]*.txt", "tmp")),
+    val blacklistRegex: String = "notmovethisfile\\.txt|orthisfile\\.txt",
+    val extensionRegex: String = "avi|mkv|mp4"
+)
+
+class UserConfFileDataHolder : DataHolder() {
+    private val location = File(System.getProperty("user.home")).resolve(".move_by_regex").resolve("move.conf")
+    private fun createIfNotExist() {
+        if (location.exists() && location.canRead()) {
+        } else {
+            save(UserConfFile())
+        }
+    }
+
+    private fun save(conf: UserConfFile) {
+        location.parentFile.mkdirs()
+        val unpretty = Klaxon().toJsonString(conf)
+        val parsed = Klaxon().parseJsonObject(unpretty.reader())
+        location.writeText(parsed.toJsonString(true))
+    }
+
+    private fun load(): UserConfFile = Klaxon().parse<UserConfFile>(location.readText()) ?: throw IllegalStateException(
+        "Conf File at ${location.absolutePath} seems to be missing or corrupted, please repair or delete the file manually and rerun the command afterwards."
+    )
+
+    private var userConfFile: UserConfFile
+
+    init {
+        createIfNotExist()
+        userConfFile = load()
+    }
+
+    override var regexesFiles: List<Pair<Regex, File>>
+        get() = userConfFile.regexMatches.map { Pair(it.regex.toRegex(), File(it.filepath)) }
+        set(value) {
+            userConfFile =
+                userConfFile.copy(regexMatches = value.map { RegexFilePair(it.first.toString(), it.second.path) })
+            save(userConfFile)
+        }
+    override var fileExtensionRegex: Regex
+        get() = userConfFile.extensionRegex.toRegex()
+        set(value) {
+            userConfFile = userConfFile.copy(extensionRegex = value.toString())
+            save(userConfFile)
+        }
+    override var exclusionRegex: Regex
+        get() = userConfFile.blacklistRegex.toRegex()
+        set(value) {
+            userConfFile = userConfFile.copy(blacklistRegex = value.toString())
+            save(userConfFile)
+        }
+
+}
+
+class MockDataHolder : DataHolder() {
+    override var regexesFiles = listOf(Pair("\\[MyTag]thefile.mkv".toRegex(), File("tmp")))
+    override var fileExtensionRegex = "mkv".toRegex()
+    override var exclusionRegex = "fileIDoNotWant".toRegex()
+}
+
+class Delete(private val dataholder: DataHolder) : CliktCommand() {
+    private val index: Int by option(help = "index to replace, null if just add new one").int().required()
     override fun run() {
         val idx = index
         if (idx >= 0 && idx < dataholder.regexesFiles.size) {
@@ -54,10 +121,10 @@ class Delete(val dataholder: DataHolder) : CliktCommand() {
     }
 }
 
-class Add(val dataholder: DataHolder) : CliktCommand() {
-    val index: Int? by option(help = "index to replace, null if just add new one").int()
-    val regex: String by argument(help = "regex to add / update")
-    val targetParent: File by option(help = "parent directory of target, defaults to pwd").file().default(
+class Add(private val dataholder: DataHolder) : CliktCommand() {
+    private val index: Int? by option(help = "index to replace, null if just add new one").int()
+    private val regex: String by argument(help = "regex to add / update")
+    private val targetParent: File by option(help = "parent directory of target, defaults to pwd").file().default(
         File(
             System.getProperty(
                 "user.dir"
@@ -66,24 +133,30 @@ class Add(val dataholder: DataHolder) : CliktCommand() {
     )
 
     override fun run() {
-        val r = regex.toRegex()
-        val idx = index
-        if (idx == null) {
-            dataholder.regexesFiles = dataholder.regexesFiles + Pair(r, targetParent)
-        } else if (idx >= 0 && idx < dataholder.regexesFiles.size) {
-            dataholder.regexesFiles =
-                ((dataholder.regexesFiles.subList(0, idx) + Pair(r, targetParent)) + (dataholder.regexesFiles.subList(
-                    idx + 1,
-                    dataholder.regexesFiles.size
-                )))
-        } else {
-            throw UsageError("idx is not allowed to be outside [0,${dataholder.regexesFiles.size})")
+        //check if not already contained:
+        if (!(dataholder.regexesFiles.any { it.first.toString() == regex })) {
+            val r = regex.toRegex()
+            val idx = index
+            if (idx == null) {
+                dataholder.regexesFiles = dataholder.regexesFiles + Pair(r, targetParent)
+            } else if (idx >= 0 && idx < dataholder.regexesFiles.size) {
+                dataholder.regexesFiles =
+                    ((dataholder.regexesFiles.subList(0, idx) + Pair(
+                        r,
+                        targetParent
+                    )) + (dataholder.regexesFiles.subList(
+                        idx + 1,
+                        dataholder.regexesFiles.size
+                    )))
+            } else {
+                throw UsageError("idx is not allowed to be outside [0,${dataholder.regexesFiles.size})")
+            }
         }
     }
 }
 
-class Dashboard(val dataholder: DataHolder) : CliktCommand() {
-    val header: Boolean by option(help = "include header with blacklist and extension filter").flag(
+class Dashboard(private val dataholder: DataHolder) : CliktCommand() {
+    private val header: Boolean by option(help = "include header with blacklist and extension filter").flag(
         "no-header",
         default = true
     )
@@ -99,22 +172,25 @@ class Dashboard(val dataholder: DataHolder) : CliktCommand() {
     }
 }
 
-class Blacklist(val dataholder: DataHolder) : CliktCommand() {
-    val regex: String by argument(help = "regex for files not to be considered to set")
+class Blacklist(private val dataholder: DataHolder) : CliktCommand() {
+    private val regex: String by argument(help = "regex for files not to be considered to set")
     override fun run() {
-        dataholder.exclusionRegex = regex.toRegex();
+        dataholder.exclusionRegex = regex.toRegex()
     }
 }
 
-class Extension(val dataholder: DataHolder) : CliktCommand() {
-    val regex: String by argument(help = "regex for file extensions to set")
+class Extension(private val dataholder: DataHolder) : CliktCommand() {
+    private val regex: String by argument(help = "regex for file extensions to set")
     override fun run() {
-        dataholder.fileExtensionRegex = regex.toRegex();
+        dataholder.fileExtensionRegex = regex.toRegex()
     }
 }
 
-class Check(val dataholder: DataHolder) : CliktCommand(), Retrievable {
-    val files: List<File> by argument(help = "files to be scanned").file(exists = true, readable = true).multiple(
+class Check(private val dataholder: DataHolder) : CliktCommand(), Retrievable {
+    private val files: List<File> by argument(help = "files to be scanned").file(
+        exists = true,
+        readable = true
+    ).multiple(
         required = true
     )
 
@@ -166,18 +242,21 @@ interface Retrievable {
 
 }
 
-val noTestModeFlag = "--no-test-mode"
+const val noTestModeFlag = "--no-test-mode"
 
-class Move(val dataholder: DataHolder) : CliktCommand(), Retrievable {
-    val files: List<File> by argument(help = "files to be scanned").file(exists = true, readable = true).multiple(
+class Move(private val dataholder: DataHolder) : CliktCommand(), Retrievable {
+    private val files: List<File> by argument(help = "files to be scanned").file(
+        exists = true,
+        readable = true
+    ).multiple(
         required = true
     )
-    val testMode: Boolean by option(help = "set to off/no if you actually want to change files").flag(
+    private val testMode: Boolean by option(help = "set to off/no if you actually want to change files").flag(
         noTestModeFlag,
         default = true
     )
-    val copyFiles: Boolean by option(help = "set flag to use copy instead of move").flag()
-    val overwriteExisting: Boolean by option().flag()
+    private val copyFiles: Boolean by option(help = "set flag to use copy instead of move").flag()
+    private val overwriteExisting: Boolean by option().flag()
 
     override fun run() {
         listFilesRecursively(files).filterMapByRegexList(
@@ -206,7 +285,7 @@ class Move(val dataholder: DataHolder) : CliktCommand(), Retrievable {
 
     private fun Map<File, File>.testMode(doNotModify: Boolean): Map<File, File> {
         if (doNotModify) println(
-            "Test mode is active, so no files will be moved / copied. Use ${noTestModeFlag} to move. Files would have been: ${this.keys.joinToString(
+            "Test mode is active, so no files will be moved / copied. Use $noTestModeFlag to move. Files would have been: ${this.keys.joinToString(
                 ";"
             ) { it.absolutePath }}"
         )
