@@ -138,12 +138,12 @@ class Add(private val dataholder: DataHolder) : CliktCommand() {
             val r = regex.toRegex()
             val idx = index
             if (idx == null) {
-                dataholder.regexesFiles = dataholder.regexesFiles + Pair(r, targetParent)
+                dataholder.regexesFiles = dataholder.regexesFiles + Pair(r, targetParent.absoluteFile)
             } else if (idx >= 0 && idx < dataholder.regexesFiles.size) {
                 dataholder.regexesFiles =
                     ((dataholder.regexesFiles.subList(0, idx) + Pair(
                         r,
-                        targetParent
+                        targetParent.absoluteFile
                     )) + (dataholder.regexesFiles.subList(
                         idx + 1,
                         dataholder.regexesFiles.size
@@ -196,7 +196,7 @@ class Check(private val dataholder: DataHolder) : CliktCommand(), Retrievable {
 
     override fun run() {
         println("checking in ${File(System.getProperty("user.dir")).absolutePath}:")
-        listFilesRecursively(files).filterMapByRegexList(
+        listFilesRecursively(files, dataholder.fileExtensionRegex).filterMapByRegexList(
             dataholder.regexesFiles,
             dataholder.exclusionRegex,
             dataholder.fileExtensionRegex
@@ -207,13 +207,17 @@ class Check(private val dataholder: DataHolder) : CliktCommand(), Retrievable {
 
 interface Retrievable {
 
-    fun listFilesRecursively(filesAndDirectories: List<File>): List<File> =
-        filesAndDirectories.flatMap { input ->
-            Files.find(input.toPath(), Integer.MAX_VALUE, BiPredicate { _, fileAttr -> fileAttr.isRegularFile })
+    fun listFilesRecursively(filesAndDirectories: List<File>, extensionRegex: Regex): List<File> {
+        return filesAndDirectories.flatMap { input ->
+            Files.find(
+                input.toPath(),
+                Integer.MAX_VALUE,
+                BiPredicate { filePath, fileAttr -> fileAttr.isRegularFile && extensionRegex.matches(((filePath.toFile().extension))) })
                 .map { it.toFile() }.collect(
                     Collectors.toList()
                 )
         }
+    }
 
 
     //returns source / target pairs
@@ -221,11 +225,14 @@ interface Retrievable {
         regexToTargetDirectory: List<Pair<Regex, File>>,
         blacklist: Regex,
         extensionRegex: Regex
-    ): Map<File, File> = this.filter {
-        checkBlacklist(blacklist, it)
-    }.filter {
-        checkExtension(extensionRegex, it)
-    }.mapNotNull { mapWithRegex(regexToTargetDirectory, it) }.toMap()
+    ): Map<File, File> {
+        return this.filter {
+            checkBlacklist(blacklist, it)
+        }.filter {
+            checkExtension(extensionRegex, it)
+        }.mapNotNull { mapWithRegex(regexToTargetDirectory, it) }.toMap()
+    }
+
 
     fun checkBlacklist(blacklist: Regex, file: File): Boolean = !blacklist.containsMatchIn(file.path)
 
@@ -259,7 +266,7 @@ class Move(private val dataholder: DataHolder) : CliktCommand(), Retrievable {
     private val overwriteExisting: Boolean by option().flag()
 
     override fun run() {
-        listFilesRecursively(files).filterMapByRegexList(
+        listFilesRecursively(files, dataholder.fileExtensionRegex).filterMapByRegexList(
             dataholder.regexesFiles,
             dataholder.exclusionRegex,
             dataholder.fileExtensionRegex
