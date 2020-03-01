@@ -284,7 +284,8 @@ class Check(private val dataholder: DataHolder) : CliktCommand(), Retrievable {
     )
 
     override fun run() {
-        println("checking in ${File(System.getProperty("user.dir")).absolutePath}:")
+        println("checking in pwd = ${File(System.getProperty("user.dir")).absolutePath}:")
+        files.forEach { println("checking dir: ${it.absolutePath} (exists = ${it.exists()} , directory = ${it.isDirectory} , readable = ${it.canRead()}") }
         listFilesRecursively(files, dataholder.fileExtensionRegex).filterMapByRegexList(
             dataholder.regexesFiles,
             dataholder.exclusionRegex,
@@ -298,13 +299,17 @@ interface Retrievable {
 
     fun listFilesRecursively(filesAndDirectories: List<File>, extensionRegex: Regex): List<File> {
         return filesAndDirectories.flatMap { input ->
-            Files.find(
-                input.toPath(),
-                Integer.MAX_VALUE,
-                BiPredicate { filePath, fileAttr -> fileAttr.isRegularFile && extensionRegex.matches(((filePath.toFile().extension))) })
-                .map { it.toFile() }.collect(
-                    Collectors.toList()
-                )
+            if (input.isFile) {
+                listOf(input)
+            } else {
+                Files.find(
+                    input.toPath(),
+                    Integer.MAX_VALUE,
+                    BiPredicate { filePath, fileAttr -> fileAttr.isRegularFile && extensionRegex.matches(((filePath.toFile().extension))) })
+                    .map { it.toFile() }.collect(
+                        Collectors.toList()
+                    )
+            }
         }
     }
 
