@@ -405,6 +405,10 @@ class Move(private val dataholder: DataHolder) : CliktCommand(), Retrievable {
 
 
     private fun Map.Entry<File, File>.moveCopy(moveInsteadOfCopy: Boolean) {
+        //skip if already at target
+        if (this.key.absolutePath == this.value.absolutePath) {
+            return
+        }
         if (moveInsteadOfCopy) {
             Files.move(
                 this.key.toPath(),
