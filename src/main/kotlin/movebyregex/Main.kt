@@ -140,11 +140,10 @@ class Generalize(private val dataholder: DataHolder) : CliktCommand() {
     }
 
     private fun Regex.store(parentDir: File): Regex {
-        if (!(dataholder.regexesFiles.any { it.first.toString() == this.toString() })) {
-            dataholder.regexesFiles = dataholder.regexesFiles.pushAtIndex(null, this, parentDir)
-        }
+        val existingIndex = (dataholder.regexesFiles.indexOfFirst { it.first.toString() == this.toString() })
+        dataholder.regexesFiles =
+            dataholder.regexesFiles.pushAtIndex(existingIndex.let { if (it < 0) null else it }, this, parentDir)
         return this
-
     }
 
 
