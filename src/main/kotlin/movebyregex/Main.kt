@@ -1,13 +1,18 @@
 package movebyregex
 
 import com.beust.klaxon.Klaxon
-import com.github.ajalt.clikt.core.*
+import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.core.UsageError
+import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.arguments.multiple
-import com.github.ajalt.clikt.parameters.options.*
-import com.github.ajalt.clikt.parameters.types.*
+import com.github.ajalt.clikt.parameters.options.default
+import com.github.ajalt.clikt.parameters.options.flag
+import com.github.ajalt.clikt.parameters.options.option
+import com.github.ajalt.clikt.parameters.options.required
+import com.github.ajalt.clikt.parameters.types.file
+import com.github.ajalt.clikt.parameters.types.int
 import java.io.File
-import java.lang.IllegalStateException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.function.BiPredicate
@@ -24,6 +29,7 @@ fun main(args: Array<String>) {
         Move(data),
         Blacklist(data),
         Extension(data),
+        Generalize(data),
         Check(data)
     ).main(args)
 }
@@ -82,7 +88,12 @@ class UserConfFileDataHolder : DataHolder() {
         get() = userConfFile.regexMatches.map { Pair(it.regex.toRegex(), File(it.filepath)) }
         set(value) {
             userConfFile =
-                userConfFile.copy(regexMatches = value.map { RegexFilePair(it.first.toString(), it.second.path) })
+                userConfFile.copy(regexMatches = value.map {
+                    RegexFilePair(
+                        it.first.toString(),
+                        it.second.path
+                    )
+                }.sortedBy { it.regex })
             save(userConfFile)
         }
     override var fileExtensionRegex: Regex
@@ -105,6 +116,97 @@ class MockDataHolder : DataHolder() {
     override var fileExtensionRegex = "mkv".toRegex()
     override var exclusionRegex = "fileIDoNotWant".toRegex()
 }
+
+
+class Generalize(private val dataholder: DataHolder) : CliktCommand() {
+    private val file: File by argument(help = "file that is generalized by exchanging numbers for number wildcards, and combined with given parent directory").file(
+        exists = true,
+        readable = true
+    )
+
+    override fun run() {
+        println("file = " + file.absolutePath)
+        println("file.parentFile = " + file.absoluteFile.parent)
+        val regex =
+            file.name.generalizeFileName().verifyFileNameWithRegex(file.name).store(file.absoluteFile.parentFile)
+        println("added regex: $regex")
+    }
+
+    private fun Regex.verifyFileNameWithRegex(fileName: String): Regex {
+        if (!this.matches(fileName)) {
+            throw IllegalStateException("generated regex '${this}' does not match input string '$fileName', this implies a bug in this software for the given input string. Please open a ticket on the github repository.")
+        }
+        return this
+    }
+
+    private fun Regex.store(parentDir: File): Regex {
+        if (!(dataholder.regexesFiles.any { it.first.toString() == this.toString() })) {
+            dataholder.regexesFiles = dataholder.regexesFiles.pushAtIndex(null, this, parentDir)
+        }
+        return this
+
+    }
+
+
+}
+
+
+private const val digitPattern = "[0-9]+"
+fun String.generalizeFileName(): Regex {
+    val exact = this.replace(".", "\\.").replace("[", "\\[")
+    //from including to excluding
+    val digitAreas = mutableListOf<Pair<Int, Int>>()
+    val charArr = exact.toCharArray()
+    var lastStart: Int? = null
+    charArr.forEachIndexed { idx, char ->
+        if (!char.isADigit()) {
+            //finish existing pair
+            if (lastStart != null) {
+                digitAreas.add(Pair(lastStart!!, idx))
+                lastStart = null
+            }
+        } else {
+            if (idx < 1) {
+                //special case: first digit
+                lastStart = 0
+            } else {
+                val prev = charArr[idx - 1]
+                if (prev.isADigit()) {
+                    //do nothing
+                } else {
+                    lastStart = idx
+                }
+            }
+        }
+    }
+    if (lastStart != null) {
+        digitAreas.add(Pair(lastStart!!, charArr.size))
+    }
+    var offset = 0
+    var word = exact
+    digitAreas.forEach {
+        //replace the given substring in the word using offset, increase or decrease offset
+        word = word.replaceRange(it.first + offset, it.second + offset, digitPattern)
+        val dif = it.second - it.first
+        offset += digitPattern.length - dif
+    }
+    return word.toRegex()
+}
+
+private fun Char.isADigit(): Boolean {
+    return this.isDigit()
+}
+
+private fun <E, F> List<Pair<E, F>>.pushAtIndex(idx: Int?, key: E, value: F): List<Pair<E, F>> {
+    return if (idx == null) {
+        this + Pair(key, value)
+    } else if (idx >= 0 && idx < this.size) {
+        ((this.subList(0, idx) + Pair(key, value)) + (this.subList(idx + 1, this.size)))
+    } else {
+        throw UsageError("idx is not allowed to be outside [0,${this.size})")
+    }
+}
+
 
 class Delete(private val dataholder: DataHolder) : CliktCommand() {
     private val index: Int by option(help = "index to replace, null if just add new one").int().required()
@@ -137,20 +239,7 @@ class Add(private val dataholder: DataHolder) : CliktCommand() {
         if (!(dataholder.regexesFiles.any { it.first.toString() == regex })) {
             val r = regex.toRegex()
             val idx = index
-            if (idx == null) {
-                dataholder.regexesFiles = dataholder.regexesFiles + Pair(r, targetParent.absoluteFile)
-            } else if (idx >= 0 && idx < dataholder.regexesFiles.size) {
-                dataholder.regexesFiles =
-                    ((dataholder.regexesFiles.subList(0, idx) + Pair(
-                        r,
-                        targetParent.absoluteFile
-                    )) + (dataholder.regexesFiles.subList(
-                        idx + 1,
-                        dataholder.regexesFiles.size
-                    )))
-            } else {
-                throw UsageError("idx is not allowed to be outside [0,${dataholder.regexesFiles.size})")
-            }
+            dataholder.regexesFiles = dataholder.regexesFiles.pushAtIndex(idx, r, targetParent.absoluteFile)
         }
     }
 }
